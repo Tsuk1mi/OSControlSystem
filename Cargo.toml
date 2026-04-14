@@ -1,0 +1,17 @@
+[package]
+name = "OSControlAssistant"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = []
+## Сегментация кожи и предобработка кадра через OpenCV (нужны библиотеки OpenCV в системе, см. https://github.com/twistedfall/opencv-rust )
+opencv = ["dep:opencv"]
+
+[dependencies]
+eframe = "0.31"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+# default-features = false отключает decoding/mjpeg → mozjpeg-sys (часто падает на cl без NASM)
+nokhwa = { version = "0.10.10", default-features = false, features = ["input-native"] }
+opencv = { version = "0.93", optional = true, default-features = false, features = ["imgproc"] }
