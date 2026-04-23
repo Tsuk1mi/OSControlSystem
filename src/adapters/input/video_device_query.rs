@@ -1,7 +1,7 @@
 use std::process::Command;
 
-use nokhwa::utils::ApiBackend;
 use nokhwa::query;
+use nokhwa::utils::ApiBackend;
 
 /// Список имён видеоустройств для выбора камеры жестов.
 pub fn list_video_inputs() -> Vec<String> {

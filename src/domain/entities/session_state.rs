@@ -1,10 +1,18 @@
 use std::time::Instant;
 
 use crate::gesture_os_control::domain::entities::gesture::PipelineGestureStats;
-use crate::gesture_os_control::domain::services::command_mapper::{CommandMapper, GestureCommandMap};
-use crate::gesture_os_control::domain::services::gesture_classifier::{GestureClassifier, GestureClassifierConfig};
-use crate::gesture_os_control::domain::services::safety_guard::{SafetyContext, SafetyGuard, SafetyGuardConfig};
-use crate::gesture_os_control::domain::services::temporal_filter::{TemporalGestureFilter, TemporalFilterConfig};
+use crate::gesture_os_control::domain::services::command_mapper::{
+    CommandMapper, GestureCommandMap,
+};
+use crate::gesture_os_control::domain::services::gesture_classifier::{
+    GestureClassifier, GestureClassifierConfig,
+};
+use crate::gesture_os_control::domain::services::safety_guard::{
+    SafetyContext, SafetyGuard, SafetyGuardConfig,
+};
+use crate::gesture_os_control::domain::services::temporal_filter::{
+    TemporalFilterConfig, TemporalGestureFilter,
+};
 
 /// Сессия обработки: хранит состояние фильтра, классификатора и защиты.
 pub struct FrameProcessingSession {

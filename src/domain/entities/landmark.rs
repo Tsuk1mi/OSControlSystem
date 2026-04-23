@@ -36,11 +36,66 @@ pub fn estimate_hand_landmarks(rgb: &[u8], width: usize, height: usize) -> Optio
     points[9] = [centroid_x, centroid_y, 0.0];
 
     let tips = select_five_tips(&peaks, centroid_x, centroid_y, wrist_x, wrist_y);
-    interpolate_finger_chain(&mut points, 0, 1, 2, 3, 4, wrist_x, wrist_y, tips[0].0, tips[0].1);
-    interpolate_finger_chain(&mut points, 0, 5, 6, 7, 8, centroid_x, centroid_y, tips[1].0, tips[1].1);
-    interpolate_finger_chain(&mut points, 0, 9, 10, 11, 12, centroid_x, centroid_y, tips[2].0, tips[2].1);
-    interpolate_finger_chain(&mut points, 0, 13, 14, 15, 16, centroid_x, centroid_y, tips[3].0, tips[3].1);
-    interpolate_finger_chain(&mut points, 0, 17, 18, 19, 20, centroid_x, centroid_y, tips[4].0, tips[4].1);
+    interpolate_finger_chain(
+        &mut points,
+        0,
+        1,
+        2,
+        3,
+        4,
+        wrist_x,
+        wrist_y,
+        tips[0].0,
+        tips[0].1,
+    );
+    interpolate_finger_chain(
+        &mut points,
+        0,
+        5,
+        6,
+        7,
+        8,
+        centroid_x,
+        centroid_y,
+        tips[1].0,
+        tips[1].1,
+    );
+    interpolate_finger_chain(
+        &mut points,
+        0,
+        9,
+        10,
+        11,
+        12,
+        centroid_x,
+        centroid_y,
+        tips[2].0,
+        tips[2].1,
+    );
+    interpolate_finger_chain(
+        &mut points,
+        0,
+        13,
+        14,
+        15,
+        16,
+        centroid_x,
+        centroid_y,
+        tips[3].0,
+        tips[3].1,
+    );
+    interpolate_finger_chain(
+        &mut points,
+        0,
+        17,
+        18,
+        19,
+        20,
+        centroid_x,
+        centroid_y,
+        tips[4].0,
+        tips[4].1,
+    );
 
     let palm_center = [centroid_x, centroid_y, 0.0];
     let wrist = [wrist_x, wrist_y, 0.0];
@@ -66,7 +121,11 @@ pub fn estimate_hand_landmarks(rgb: &[u8], width: usize, height: usize) -> Optio
 }
 
 /// Отсекает «кисть» из случайного кожного пятна без реальной руки в кадре.
-pub fn hand_landmarks_plausible(lm: &HandLandmarks, frame_width: usize, frame_height: usize) -> bool {
+pub fn hand_landmarks_plausible(
+    lm: &HandLandmarks,
+    frame_width: usize,
+    frame_height: usize,
+) -> bool {
     let min_dim = frame_width.min(frame_height) as f64;
     if min_dim < 1.0 {
         return false;
@@ -117,7 +176,9 @@ fn skin_mask_preferred(rgb: &[u8], w: usize, h: usize) -> Vec<bool> {
     #[cfg(feature = "opencv")]
     {
         if let Ok(m) =
-            crate::gesture_os_control::domain::services::opencv_skin_mask::skin_mask_opencv(rgb, w, h)
+            crate::gesture_os_control::domain::services::opencv_skin_mask::skin_mask_opencv(
+                rgb, w, h,
+            )
         {
             let on = m.iter().copied().filter(|x| x).count();
             if on >= 120 {
@@ -140,13 +201,7 @@ fn skin_mask_classic(rgb: &[u8], w: usize, h: usize) -> Vec<bool> {
         let b = rgb[o + 2] as i32;
         let max = r.max(g).max(b);
         let min = r.min(g).min(b);
-        if r > 95
-            && g > 40
-            && b > 20
-            && (r - g) > 15
-            && (r - b) > 15
-            && (max - min) > 15
-        {
+        if r > 95 && g > 40 && b > 20 && (r - g) > 15 && (r - b) > 15 && (max - min) > 15 {
             mask[i] = true;
         }
     }
@@ -275,7 +330,13 @@ fn ray_boundary_distance(
     }
 }
 
-fn radial_distance_peaks(component: &[bool], cx: f64, cy: f64, w: usize, h: usize) -> Vec<(f64, f64)> {
+fn radial_distance_peaks(
+    component: &[bool],
+    cx: f64,
+    cy: f64,
+    w: usize,
+    h: usize,
+) -> Vec<(f64, f64)> {
     let steps = 56;
     let mut radii = vec![0.0_f64; steps];
     for i in 0..steps {
@@ -328,13 +389,7 @@ fn radial_distance_peaks(component: &[bool], cx: f64, cy: f64, w: usize, h: usiz
     filtered.into_iter().map(|p| (p.0, p.1)).collect()
 }
 
-fn select_five_tips(
-    peaks: &[(f64, f64)],
-    cx: f64,
-    cy: f64,
-    wx: f64,
-    wy: f64,
-) -> [(f64, f64); 5] {
+fn select_five_tips(peaks: &[(f64, f64)], cx: f64, cy: f64, wx: f64, wy: f64) -> [(f64, f64); 5] {
     let mut scored: Vec<((f64, f64), f64)> = peaks
         .iter()
         .copied()
@@ -365,20 +420,8 @@ fn interpolate_finger_chain(
     bx: f64,
     by: f64,
 ) {
-    points[mcp_idx] = [
-        ax + (bx - ax) * 0.35,
-        ay + (by - ay) * 0.35,
-        0.0,
-    ];
-    points[pip_idx] = [
-        ax + (bx - ax) * 0.62,
-        ay + (by - ay) * 0.62,
-        0.0,
-    ];
-    points[dip_idx] = [
-        ax + (bx - ax) * 0.82,
-        ay + (by - ay) * 0.82,
-        0.0,
-    ];
+    points[mcp_idx] = [ax + (bx - ax) * 0.35, ay + (by - ay) * 0.35, 0.0];
+    points[pip_idx] = [ax + (bx - ax) * 0.62, ay + (by - ay) * 0.62, 0.0];
+    points[dip_idx] = [ax + (bx - ax) * 0.82, ay + (by - ay) * 0.82, 0.0];
     points[tip_idx] = [bx, by, 0.0];
 }

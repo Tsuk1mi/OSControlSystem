@@ -1,9 +1,9 @@
 use eframe::egui;
 
+use super::gesture_view_model::GestureViewModel;
+use crate::gesture_os_control::AppRunMode;
 use crate::gesture_os_control::domain::entities::command::OsCommand;
 use crate::gesture_os_control::domain::value_objects::gesture_id::GestureId;
-use crate::gesture_os_control::AppRunMode;
-use super::gesture_view_model::GestureViewModel;
 
 pub fn render_gesture_controls(ui: &mut egui::Ui, view_model: &mut GestureViewModel) {
     ui.horizontal(|ui| {
@@ -78,10 +78,7 @@ pub fn render_gesture_controls(ui: &mut egui::Ui, view_model: &mut GestureViewMo
     if let Some(stats) = view_model.gesture_pipeline_stats() {
         ui.label(format!(
             "FPS {:.1} · кадров {} · устойч. {:.2} · увер. {:.2}",
-            stats.fps_smoothed,
-            stats.frames_captured,
-            stats.last_stability,
-            stats.last_confidence
+            stats.fps_smoothed, stats.frames_captured, stats.last_stability, stats.last_confidence
         ));
     }
 

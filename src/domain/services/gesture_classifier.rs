@@ -18,10 +18,11 @@ impl Default for GestureClassifierConfig {
     }
 }
 
-/// Классификатор жестов по landmarks и короткой истории ладони.
+// Классификатор жестов по landmarks и короткой истории ладони.
 pub struct GestureClassifier {
     config: GestureClassifierConfig,
     palm_history: VecDeque<(Instant, f64, f64)>,
+    last_motion: Option<[f32; 2]>,
 }
 
 impl GestureClassifier {
@@ -29,6 +30,7 @@ impl GestureClassifier {
         Self {
             config,
             palm_history: VecDeque::new(),
+            last_motion: None,
         }
     }
 
@@ -38,6 +40,11 @@ impl GestureClassifier {
 
     pub fn clear_palm_history(&mut self) {
         self.palm_history.clear();
+        self.last_motion = None;
+    }
+
+    pub fn last_motion(&self) -> Option<[f32; 2]> {
+        self.last_motion
     }
 
     pub fn classify(
@@ -62,14 +69,32 @@ impl GestureClassifier {
             self.palm_history.pop_front();
         }
 
-        let dyn_id = detect_swipe(&self.palm_history, self.config.sensitivity, fw, fh);
         let static_id = classify_static_geom(&norm, self.config.sensitivity);
+        let static_confidence = if static_id != GestureId::None {
+            (finger.confidence * 0.5 + 0.45).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let swipe = detect_swipe(
+            &self.palm_history,
+            self.config.sensitivity,
+            fw,
+            fh,
+            static_id != GestureId::None,
+        );
+        self.last_motion = swipe
+            .as_ref()
+            .map(|info| info.motion)
+            .or_else(|| motion_vector(&self.palm_history, fw, fh));
 
-        let (gesture, gesture_type, confidence) = if let Some(swipe) = dyn_id {
-            (swipe, GestureType::Dynamic, 0.78_f32)
+        let (gesture, gesture_type, confidence) = if let Some(swipe) = swipe {
+            if static_id == GestureId::None || swipe.confidence > static_confidence + 0.12 {
+                (swipe.gesture, GestureType::Dynamic, swipe.confidence)
+            } else {
+                (static_id, GestureType::Static, static_confidence)
+            }
         } else if static_id != GestureId::None {
-            let boosted = (finger.confidence * 0.5 + 0.45).clamp(0.0, 1.0);
-            (static_id, GestureType::Static, boosted)
+            (static_id, GestureType::Static, static_confidence)
         } else {
             (GestureId::None, GestureType::None, 0.0_f32)
         };
@@ -216,6 +241,16 @@ fn thumb_sticking_up_geom(norm: &NormalizedLandmarks, s: f64) -> bool {
     tip[1] < ip[1] - 0.05 && radial > 1.12 - 0.08 * (1.0 - s)
 }
 
+fn thumb_sticking_down_geom(norm: &NormalizedLandmarks, s: f64) -> bool {
+    let tip = norm.points[4];
+    let ip = norm.points[3];
+    let mcp = norm.points[2];
+    let dt = distance3(&tip, &norm.points[0]);
+    let dm = distance3(&mcp, &norm.points[0]).max(1.0e-9);
+    let radial = dt / dm;
+    tip[1] > ip[1] + 0.05 && radial > 1.10 - 0.08 * (1.0 - s)
+}
+
 fn classify_static_geom(norm: &NormalizedLandmarks, sensitivity: f32) -> GestureId {
     let s = sensitivity.clamp(0.05, 0.99) as f64;
 
@@ -225,6 +260,7 @@ fn classify_static_geom(norm: &NormalizedLandmarks, sensitivity: f32) -> Gesture
     let thumb_pinky = distance3(&norm.points[4], &norm.points[17]);
 
     let index_straight = finger_straight_geom(norm, 6, 8, s);
+    let middle_straight = finger_straight_geom(norm, 10, 12, s);
     let others_curled = finger_curled_geom(norm, 10, 12, s)
         && finger_curled_geom(norm, 14, 16, s)
         && finger_curled_geom(norm, 18, 20, s);
@@ -234,7 +270,16 @@ fn classify_static_geom(norm: &NormalizedLandmarks, sensitivity: f32) -> Gesture
         return GestureId::Pointing;
     }
 
-    // 2) Открытая ладонь — три и более вытянутых или явно указ.+средний.
+    // 2) Victory / peace — вытянуты указательный и средний, остальные пальцы согнуты.
+    if index_straight
+        && middle_straight
+        && finger_curled_geom(norm, 14, 16, s)
+        && finger_curled_geom(norm, 18, 20, s)
+    {
+        return GestureId::Victory;
+    }
+
+    // 3) Открытая ладонь — три и более вытянутых или явно указ.+средний.
     if straight4 >= 3
         || (straight4 >= 2
             && finger_straight_geom(norm, 6, 8, s)
@@ -243,11 +288,15 @@ fn classify_static_geom(norm: &NormalizedLandmarks, sensitivity: f32) -> Gesture
         return GestureId::OpenPalm;
     }
 
-    // 3–4) Кулак vs большой палец: оба с согнутыми пальцами; различие — «большой вверх» и отступ от мизинца.
+    // 4–6) Кулак vs большой палец: оба с согнутыми пальцами; различие — направление большого пальца.
     if curled4 >= 3 {
         let up = thumb_sticking_up_geom(norm, s);
+        let down = thumb_sticking_down_geom(norm, s);
         if up && thumb_pinky > 0.38 * palm_span {
             return GestureId::ThumbUp;
+        }
+        if down && thumb_pinky > 0.34 * palm_span {
+            return GestureId::ThumbDown;
         }
         if !up && thumb_pinky < 0.48 * palm_span {
             return GestureId::ClosedFist;
@@ -262,26 +311,77 @@ fn detect_swipe(
     sensitivity: f32,
     frame_w: f64,
     frame_h: f64,
-) -> Option<GestureId> {
-    if history.len() < 5 {
+    prefer_static: bool,
+) -> Option<SwipeDetection> {
+    if history.len() < 6 {
         return None;
     }
     let first = history.front()?;
     let last = history.back()?;
     let dx = (last.1 - first.1) / frame_w.max(1.0);
     let dy = (last.2 - first.2) / frame_h.max(1.0);
-    let thr = 0.085 - 0.04 * sensitivity as f64;
-    if dx.abs() < thr {
-        return None;
-    }
-    if dy.abs() > 0.22 {
-        return None;
-    }
-    if dx > 0.0 {
-        Some(GestureId::SwipeRight)
+    let elapsed = last.0.duration_since(first.0).as_secs_f64().max(1.0e-3);
+    let distance_threshold = if prefer_static {
+        0.14 - 0.03 * sensitivity as f64
     } else {
-        Some(GestureId::SwipeLeft)
+        0.095 - 0.03 * sensitivity as f64
+    };
+    if dx.abs() < distance_threshold {
+        return None;
     }
+    let horizontal_dominance = dx.abs() / (dx.abs() + dy.abs() + 1.0e-6);
+    if horizontal_dominance < if prefer_static { 0.9 } else { 0.82 } {
+        return None;
+    }
+    if dy.abs() > if prefer_static { 0.12 } else { 0.16 } {
+        return None;
+    }
+
+    let mut total_step_dx = 0.0_f64;
+    let mut consistent_step_dx = 0.0_f64;
+    let direction = dx.signum();
+    for pair in history.as_slices().0.windows(2) {
+        let step_dx = (pair[1].1 - pair[0].1) / frame_w.max(1.0);
+        total_step_dx += step_dx.abs();
+        if step_dx.signum() == direction {
+            consistent_step_dx += step_dx.abs();
+        }
+    }
+    for pair in history.as_slices().1.windows(2) {
+        let step_dx = (pair[1].1 - pair[0].1) / frame_w.max(1.0);
+        total_step_dx += step_dx.abs();
+        if step_dx.signum() == direction {
+            consistent_step_dx += step_dx.abs();
+        }
+    }
+    let consistency = if total_step_dx <= 1.0e-6 {
+        0.0
+    } else {
+        consistent_step_dx / total_step_dx
+    };
+    if consistency < if prefer_static { 0.86 } else { 0.78 } {
+        return None;
+    }
+
+    let velocity = dx.abs() / elapsed;
+    let min_velocity = if prefer_static { 0.33 } else { 0.24 };
+    if velocity < min_velocity {
+        return None;
+    }
+
+    let confidence = ((dx.abs() - distance_threshold) / 0.16
+        + (velocity - min_velocity) / 0.65
+        + (consistency - 0.72))
+        .clamp(0.0, 1.0) as f32;
+    Some(SwipeDetection {
+        gesture: if dx > 0.0 {
+            GestureId::SwipeRight
+        } else {
+            GestureId::SwipeLeft
+        },
+        confidence: confidence.max(0.62),
+        motion: [dx as f32, dy as f32],
+    })
 }
 
 fn distance3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
@@ -291,3 +391,22 @@ fn distance3(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
+fn motion_vector(
+    history: &VecDeque<(Instant, f64, f64)>,
+    frame_w: f64,
+    frame_h: f64,
+) -> Option<[f32; 2]> {
+    let first = history.front()?;
+    let last = history.back()?;
+    Some([
+        ((last.1 - first.1) / frame_w.max(1.0)) as f32,
+        ((last.2 - first.2) / frame_h.max(1.0)) as f32,
+    ])
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SwipeDetection {
+    gesture: GestureId,
+    confidence: f32,
+    motion: [f32; 2],
+}

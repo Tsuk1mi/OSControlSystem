@@ -1,37 +1,36 @@
 use std::time::Duration;
 
-use crate::gesture_os_control::application::dto::frame_dto::FrameDto;
 use crate::gesture_os_control::domain::entities::command::OsCommand;
 use crate::gesture_os_control::domain::entities::gesture::{
     AppRunMode, FrameProcessingOutcome, FrameProcessingResult, GestureResult, GestureType,
     TemporalDecisionStatus,
 };
-use crate::gesture_os_control::domain::entities::landmark::estimate_hand_landmarks;
 use crate::gesture_os_control::domain::entities::session_state::FrameProcessingSession;
 use crate::gesture_os_control::domain::services::temporal_filter::TemporalFilterOutput;
 use crate::gesture_os_control::domain::value_objects::gesture_id::GestureId;
 
+use super::recognize_gesture_use_case::RecognizedFrame;
+
 pub struct ProcessFrameUseCase;
 
 impl ProcessFrameUseCase {
-    /// Полный цикл обработки одного кадра. Исполнение команды ОС — снаружи.
+    // Применяет temporal filter, mapper и safety guard к уже распознанному кадру.
     pub fn execute(
-        frame: &FrameDto,
         run_mode: AppRunMode,
-        sensitivity: f32,
         gesture_cooldown: Duration,
         session: &mut FrameProcessingSession,
+        recognized: RecognizedFrame,
     ) -> FrameProcessingResult {
-        session.set_sensitivity(sensitivity);
         session.stats.frames_captured = session.stats.frames_captured.saturating_add(1);
+        let timestamp = recognized.raw_gesture.timestamp;
 
         if let Some(until) = session.gesture_cooldown_until {
-            if frame.timestamp < until {
+            if timestamp < until {
                 let raw = GestureResult {
                     gesture: GestureId::None,
                     confidence: 0.0,
                     gesture_type: GestureType::None,
-                    timestamp: frame.timestamp,
+                    timestamp,
                 };
                 session.stats.last_gesture = GestureId::None;
                 session.stats.last_confidence = 0.0;
@@ -42,41 +41,14 @@ impl ProcessFrameUseCase {
                     raw_gesture: raw,
                     filter_stability: 0.0,
                     filter_status: TemporalDecisionStatus::Rejected,
+                    filter_reason: "Жесты временно на cooldown.".to_owned(),
                 };
             }
             session.gesture_cooldown_until = None;
         }
 
-        let Some(landmarks) = estimate_hand_landmarks(
-            &frame.rgb8,
-            frame.width as usize,
-            frame.height as usize,
-        ) else {
-            let raw = GestureResult {
-                gesture: GestureId::None,
-                confidence: 0.0,
-                gesture_type: GestureType::None,
-                timestamp: frame.timestamp,
-            };
-            session.stats.last_gesture = GestureId::None;
-            session.stats.last_confidence = 0.0;
-            session.stats.last_filter_status = TemporalDecisionStatus::Rejected;
-            session.stats.last_stability = 0.0;
-            return FrameProcessingResult {
-                outcome: FrameProcessingOutcome::NoGesture,
-                raw_gesture: raw,
-                filter_stability: 0.0,
-                filter_status: TemporalDecisionStatus::Rejected,
-            };
-        };
-
-        let raw = session.classifier.classify(
-            &landmarks,
-            (frame.width, frame.height),
-            frame.timestamp,
-        );
-
-        let filter_out = session.temporal.push(raw.clone(), frame.timestamp);
+        let raw = recognized.raw_gesture;
+        let filter_out = session.temporal.push(raw.clone(), timestamp);
         session.stats.last_filter_status = filter_out.status;
         session.stats.last_stability = filter_out.stability;
         session.stats.last_gesture = filter_out.gesture;
@@ -88,15 +60,11 @@ impl ProcessFrameUseCase {
         let outcome = match filter_out.status {
             TemporalDecisionStatus::Pending => FrameProcessingOutcome::GesturePending,
             TemporalDecisionStatus::Rejected => FrameProcessingOutcome::GestureRejected {
-                reason: "Нестабильный или пустой жест.".to_owned(),
+                reason: filter_out.reason.clone(),
             },
-            TemporalDecisionStatus::Confirmed => Self::handle_confirmed(
-                &filter_out,
-                run_mode,
-                session,
-                frame.timestamp,
-                gesture_cooldown,
-            ),
+            TemporalDecisionStatus::Confirmed => {
+                Self::handle_confirmed(&filter_out, run_mode, session, timestamp, gesture_cooldown)
+            }
         };
 
         FrameProcessingResult {
@@ -104,6 +72,7 @@ impl ProcessFrameUseCase {
             raw_gesture: raw,
             filter_stability,
             filter_status,
+            filter_reason: filter_out.reason.clone(),
         }
     }
 

@@ -1,52 +1,38 @@
-use eframe::egui::{self, RichText, Vec2};
+use eframe::egui::{self, RichText};
 
-use super::calibration_view::render_gesture_controls;
-use super::gesture_view_model::GestureViewModel;
+use super::bindings_tab::render_bindings_tab;
+use super::gesture_view_model::{GestureTab, GestureViewModel};
+use super::settings_tab::render_settings_tab;
+use super::video_tab::render_video_tab;
 
 pub fn render_app(ctx: &egui::Context, view_model: &mut GestureViewModel) {
     egui::TopBottomPanel::top("header").show(ctx, |ui| {
-        ui.horizontal(|ui| {
-            ui.heading(view_model.title());
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(view_model.gesture_camera_status()).weak());
+        ui.vertical(|ui| {
+            ui.horizontal(|ui| {
+                ui.heading(view_model.title());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(view_model.gesture_camera_status()).weak());
+                });
+            });
+
+            ui.horizontal(|ui| {
+                for tab in [
+                    GestureTab::Video,
+                    GestureTab::Settings,
+                    GestureTab::Bindings,
+                ] {
+                    let selected = view_model.current_tab() == tab;
+                    if ui.selectable_label(selected, tab.label_ru()).clicked() {
+                        view_model.set_current_tab(tab);
+                    }
+                }
             });
         });
     });
 
-    egui::SidePanel::right("gesture_log")
-        .resizable(true)
-        .default_width(280.0)
-        .min_width(200.0)
-        .show(ctx, |ui| {
-            ui.label(RichText::new("Журнал").strong());
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .stick_to_bottom(true)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    for line in view_model.event_log().iter() {
-                        ui.monospace(line);
-                    }
-                });
-        });
-
-    egui::CentralPanel::default().show(ctx, |ui| {
-        ui.vertical(|ui| {
-            if let Some(tex) = view_model.preview_texture() {
-                let max_w = ui.available_width().min(920.0);
-                let sz = tex.size_vec2();
-                let scale = (max_w / sz.x).min(1.0);
-                let display = sz * scale;
-                ui.image((tex.id(), display));
-            } else {
-                ui.add_sized(
-                    Vec2::new(ui.available_width(), 220.0),
-                    egui::Label::new(RichText::new("Нет видео — запустите камеру.").weak()),
-                );
-            }
-
-            ui.add_space(8.0);
-            render_gesture_controls(ui, view_model);
-        });
+    egui::CentralPanel::default().show(ctx, |ui| match view_model.current_tab() {
+        GestureTab::Video => render_video_tab(ui, view_model),
+        GestureTab::Settings => render_settings_tab(ui, view_model),
+        GestureTab::Bindings => render_bindings_tab(ui, view_model),
     });
 }

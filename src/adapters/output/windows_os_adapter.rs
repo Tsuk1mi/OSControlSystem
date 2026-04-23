@@ -4,7 +4,7 @@ use std::process::Command;
 use crate::gesture_os_control::application::ports::output::os_command_port::OsCommandPort;
 use crate::gesture_os_control::domain::entities::command::{CommandExecutionResult, OsCommand};
 
-/// Выполнение абстрактных команд в Windows (PowerShell + user32 через Add-Type).
+// Выполнение абстрактных команд в Windows (PowerShell + user32 через Add-Type).
 pub struct WindowsPipelineOsAdapter;
 
 impl WindowsPipelineOsAdapter {
@@ -36,7 +36,10 @@ impl WindowsPipelineOsAdapter {
                 description: "Нет действия.".to_owned(),
                 system_error: None,
             },
-            OsCommand::LockWorkstation => match Command::new("rundll32.exe").args(["user32.dll,LockWorkStation"]).spawn() {
+            OsCommand::LockWorkstation => match Command::new("rundll32.exe")
+                .args(["user32.dll,LockWorkStation"])
+                .spawn()
+            {
                 Ok(_) => CommandExecutionResult {
                     ok: true,
                     description: "Сеанс Windows заблокирован.".to_owned(),

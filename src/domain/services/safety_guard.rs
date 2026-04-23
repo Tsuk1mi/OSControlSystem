@@ -69,7 +69,8 @@ impl SafetyGuard {
             if confidence < self.config.critical_min_confidence {
                 return SafetyDecision {
                     allow: false,
-                    reason: "Критичная команда отклонена из-за недостаточной уверенности.".to_owned(),
+                    reason: "Критичная команда отклонена из-за недостаточной уверенности."
+                        .to_owned(),
                     needs_extra_confirmation: true,
                 };
             }

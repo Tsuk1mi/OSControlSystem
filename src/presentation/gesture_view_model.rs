@@ -4,14 +4,19 @@ use std::time::Instant;
 use eframe::egui::{self, ColorImage, TextureHandle, TextureOptions};
 
 use crate::gesture_os_control::adapters::input::video_device_query::list_video_inputs;
+use crate::gesture_os_control::domain::entities::context::{ContextDetectionMode, ContextRule};
+use crate::gesture_os_control::domain::entities::gesture_backend::GestureBackendKind;
 use crate::gesture_os_control::domain::services::command_mapper::GestureCommandMap;
+use crate::gesture_os_control::infrastructure::app_settings_io::{self, AppSettings};
+use crate::gesture_os_control::infrastructure::context_rules_io;
+use crate::gesture_os_control::infrastructure::gesture_backend::GestureBackendConfig;
 use crate::gesture_os_control::infrastructure::gesture_bindings_io;
 use crate::gesture_os_control::infrastructure::gesture_camera_service::{
     GestureCameraConfig, GestureRecognitionService, GestureServiceMessage, WebcamGestureService,
 };
 use crate::gesture_os_control::{AppRunMode, PipelineGestureStats};
 
-const LOG_CAP: usize = 300;
+const LOG_CAP: usize = 320;
 
 fn ensure_non_empty(mut items: Vec<String>, fallback: &str) -> Vec<String> {
     if items.is_empty() {
@@ -20,7 +25,26 @@ fn ensure_non_empty(mut items: Vec<String>, fallback: &str) -> Vec<String> {
     items
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum GestureTab {
+    #[default]
+    Video,
+    Settings,
+    Bindings,
+}
+
+impl GestureTab {
+    pub fn label_ru(self) -> &'static str {
+        match self {
+            Self::Video => "Видеопоток",
+            Self::Settings => "Настройки",
+            Self::Bindings => "Бинды",
+        }
+    }
+}
+
 pub struct GestureViewModel {
+    current_tab: GestureTab,
     gesture_command_map: GestureCommandMap,
     gesture_service: WebcamGestureService,
     available_video_inputs: Vec<String>,
@@ -29,9 +53,12 @@ pub struct GestureViewModel {
     gesture_camera_height: u32,
     gesture_camera_fps: u32,
     gesture_mirror_horizontal: bool,
-    gesture_run_mode: AppRunMode,
+    gesture_manual_run_mode: AppRunMode,
+    context_detection_mode: ContextDetectionMode,
+    context_rules: Vec<ContextRule>,
+    gesture_backend_kind: GestureBackendKind,
+    mediapipe_model_path: String,
     gesture_sensitivity: f32,
-    /// Пауза без распознавания после срабатывания жеста (секунды).
     gesture_cooldown_secs: f32,
     gesture_camera_status: String,
     gesture_backend_name: String,
@@ -40,6 +67,9 @@ pub struct GestureViewModel {
     event_log: VecDeque<String>,
     preview_pending: Option<(u32, u32, Vec<u8>)>,
     preview_texture: Option<TextureHandle>,
+    latest_debug_frame: Option<
+        crate::gesture_os_control::application::dto::gesture_debug_dto::GestureDebugFrameDto,
+    >,
 }
 
 impl GestureViewModel {
@@ -47,24 +77,38 @@ impl GestureViewModel {
         let gesture_service = WebcamGestureService::default();
         let gesture_backend_name = gesture_service.backend_name().to_owned();
         let available_video_inputs = ensure_non_empty(list_video_inputs(), "Камера по умолчанию");
-        let selected_video_input = available_video_inputs
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "Камера по умолчанию".to_owned());
+        let settings = app_settings_io::load_or_default();
+        let selected_video_input = if available_video_inputs
+            .iter()
+            .any(|name| name == &settings.selected_video_input)
+        {
+            settings.selected_video_input.clone()
+        } else {
+            available_video_inputs
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "Камера по умолчанию".to_owned())
+        };
 
         let gesture_command_map = gesture_bindings_io::load_merged_with_defaults();
+        let context_rules = context_rules_io::load_or_defaults();
         let mut vm = Self {
+            current_tab: GestureTab::Video,
             gesture_command_map,
             gesture_service,
             available_video_inputs,
             selected_video_input,
-            gesture_camera_width: 640,
-            gesture_camera_height: 480,
-            gesture_camera_fps: 30,
-            gesture_mirror_horizontal: false,
-            gesture_run_mode: AppRunMode::Desktop,
-            gesture_sensitivity: 0.72,
-            gesture_cooldown_secs: 1.2,
+            gesture_camera_width: settings.gesture_camera_width.max(160),
+            gesture_camera_height: settings.gesture_camera_height.max(120),
+            gesture_camera_fps: settings.gesture_camera_fps.clamp(5, 60),
+            gesture_mirror_horizontal: settings.gesture_mirror_horizontal,
+            gesture_manual_run_mode: settings.manual_run_mode,
+            context_detection_mode: settings.context_detection_mode,
+            context_rules,
+            gesture_backend_kind: settings.backend_kind,
+            mediapipe_model_path: settings.mediapipe_model_path,
+            gesture_sensitivity: settings.gesture_sensitivity.clamp(0.1, 1.0),
+            gesture_cooldown_secs: settings.gesture_cooldown_secs.clamp(0.0, 10.0),
             gesture_camera_status: "—".to_owned(),
             gesture_backend_name,
             gesture_pipeline_stats: None,
@@ -72,8 +116,9 @@ impl GestureViewModel {
             event_log: VecDeque::new(),
             preview_pending: None,
             preview_texture: None,
+            latest_debug_frame: None,
         };
-        vm.push_log("Готово.");
+        vm.push_log("Готово. Настройки и правила загружены.");
         vm
     }
 
@@ -83,14 +128,71 @@ impl GestureViewModel {
 
     fn push_log(&mut self, line: impl Into<String>) {
         let t = self.started.elapsed().as_secs_f32();
-        self.event_log.push_back(format!("{:>6.1}s  {}", t, line.into()));
+        self.event_log
+            .push_back(format!("{:>6.1}s  {}", t, line.into()));
         while self.event_log.len() > LOG_CAP {
             self.event_log.pop_front();
         }
     }
 
+    fn app_settings(&self) -> AppSettings {
+        AppSettings {
+            selected_video_input: self.selected_video_input.clone(),
+            gesture_camera_width: self.gesture_camera_width,
+            gesture_camera_height: self.gesture_camera_height,
+            gesture_camera_fps: self.gesture_camera_fps,
+            gesture_mirror_horizontal: self.gesture_mirror_horizontal,
+            gesture_sensitivity: self.gesture_sensitivity,
+            gesture_cooldown_secs: self.gesture_cooldown_secs,
+            backend_kind: self.gesture_backend_kind,
+            mediapipe_model_path: self.mediapipe_model_path.clone(),
+            context_detection_mode: self.context_detection_mode,
+            manual_run_mode: self.gesture_manual_run_mode,
+        }
+    }
+
+    fn persist_settings(&mut self) {
+        if let Err(error) = app_settings_io::save(&self.app_settings()) {
+            self.push_log(format!("настройки не сохранены: {error}"));
+        }
+    }
+
+    pub fn save_context_rules_to_file(&mut self) -> Result<(), String> {
+        context_rules_io::save(&self.context_rules)?;
+        self.push_log("Правила контекста сохранены: context_rules.json.");
+        Ok(())
+    }
+
+    fn restart_camera_if_running(&mut self, reason: &str) {
+        if !self.is_gesture_camera_running() {
+            return;
+        }
+        self.push_log(format!("{reason}; перезапуск камеры."));
+        self.stop_gesture_camera();
+        self.start_gesture_camera();
+    }
+
+    fn camera_config(&self) -> GestureCameraConfig {
+        GestureCameraConfig {
+            device_display_name: self.selected_video_input.clone(),
+            width: self.gesture_camera_width,
+            height: self.gesture_camera_height,
+            fps: self.gesture_camera_fps,
+            mirror_horizontal: self.gesture_mirror_horizontal,
+            manual_run_mode: self.gesture_manual_run_mode,
+            context_detection_mode: self.context_detection_mode,
+            context_rules: self.context_rules.clone(),
+            backend: GestureBackendConfig {
+                kind: self.gesture_backend_kind,
+                mediapipe_model_path: self.mediapipe_model_path.clone(),
+            },
+            command_map: self.gesture_command_map.clone(),
+            gesture_cooldown_ms: (self.gesture_cooldown_secs * 1000.0).round() as u32,
+        }
+    }
+
     pub fn title(&self) -> &'static str {
-        "Жесты"
+        "OS Control Assistant"
     }
 
     pub fn sync_preview_texture(&mut self, ctx: &egui::Context) {
@@ -102,9 +204,11 @@ impl GestureViewModel {
                 match &mut self.preview_texture {
                     Some(tex) => tex.set(color_image, TextureOptions::LINEAR),
                     None => {
-                        self.preview_texture = Some(
-                            ctx.load_texture("webcam_preview", color_image, TextureOptions::LINEAR),
-                        );
+                        self.preview_texture = Some(ctx.load_texture(
+                            "webcam_preview",
+                            color_image,
+                            TextureOptions::LINEAR,
+                        ));
                     }
                 }
             }
@@ -113,6 +217,13 @@ impl GestureViewModel {
 
     pub fn preview_texture(&self) -> Option<&TextureHandle> {
         self.preview_texture.as_ref()
+    }
+
+    pub fn latest_debug_frame(
+        &self,
+    ) -> Option<&crate::gesture_os_control::application::dto::gesture_debug_dto::GestureDebugFrameDto>
+    {
+        self.latest_debug_frame.as_ref()
     }
 
     pub fn event_log(&self) -> &VecDeque<String> {
@@ -133,14 +244,29 @@ impl GestureViewModel {
                     self.gesture_camera_status = error.clone();
                     self.push_log(format!("ошибка: {error}"));
                 }
-                GestureServiceMessage::PreviewFrame { width, height, rgb8 } => {
+                GestureServiceMessage::PreviewFrame {
+                    width,
+                    height,
+                    rgb8,
+                } => {
                     self.preview_pending = Some((width, height, rgb8));
+                }
+                GestureServiceMessage::DebugFrame(frame) => {
+                    self.latest_debug_frame = Some(frame);
                 }
                 GestureServiceMessage::GestureLog(line) => {
                     self.push_log(line);
                 }
             }
         }
+    }
+
+    pub fn current_tab(&self) -> GestureTab {
+        self.current_tab
+    }
+
+    pub fn set_current_tab(&mut self, tab: GestureTab) {
+        self.current_tab = tab;
     }
 
     pub fn gesture_command_map(&self) -> &GestureCommandMap {
@@ -154,31 +280,22 @@ impl GestureViewModel {
     pub fn save_gesture_bindings_to_file(&mut self) -> Result<(), String> {
         gesture_bindings_io::save(&self.gesture_command_map)?;
         self.push_log("Привязки сохранены: gesture_bindings.json рядом с exe.");
-        if self.is_gesture_camera_running() {
-            self.push_log("Перезапустите камеру (Стоп → Старт), чтобы применить привязки.");
-        }
         Ok(())
     }
 
     pub fn start_gesture_camera(&mut self) {
-        let camera = GestureCameraConfig {
-            device_display_name: self.selected_video_input.clone(),
-            width: self.gesture_camera_width,
-            height: self.gesture_camera_height,
-            fps: self.gesture_camera_fps,
-            mirror_horizontal: self.gesture_mirror_horizontal,
-            run_mode: self.gesture_run_mode,
-            command_map: self.gesture_command_map.clone(),
-            gesture_cooldown_ms: (self.gesture_cooldown_secs * 1000.0).round() as u32,
-        };
-
+        let camera = self.camera_config();
         match self
             .gesture_service
             .start(self.gesture_sensitivity, &camera)
         {
             Ok(status) => {
                 self.gesture_camera_status = status.clone();
-                self.push_log(status);
+                self.push_log(format!(
+                    "{} · backend: {}",
+                    status,
+                    self.gesture_backend_kind.label_ru()
+                ));
             }
             Err(error) => {
                 self.gesture_camera_status = error.clone();
@@ -190,6 +307,7 @@ impl GestureViewModel {
     pub fn stop_gesture_camera(&mut self) {
         self.preview_pending = None;
         self.preview_texture = None;
+        self.latest_debug_frame = None;
         match self.gesture_service.stop() {
             Ok(status) => {
                 self.gesture_camera_status = status.clone();
@@ -224,12 +342,9 @@ impl GestureViewModel {
 
     pub fn set_selected_video_input(&mut self, device_name: &str) {
         self.selected_video_input = device_name.to_owned();
+        self.persist_settings();
         self.push_log(format!("камера: {device_name}"));
-
-        if self.gesture_service.is_running() {
-            let _ = self.gesture_service.stop();
-            self.start_gesture_camera();
-        }
+        self.restart_camera_if_running("Изменён источник камеры");
     }
 
     pub fn gesture_pipeline_stats(&self) -> Option<&PipelineGestureStats> {
@@ -242,7 +357,13 @@ impl GestureViewModel {
 
     pub fn set_gesture_mirror_horizontal(&mut self, mirror: bool) {
         self.gesture_mirror_horizontal = mirror;
-        self.push_log(if mirror { "зеркало: да" } else { "зеркало: нет" });
+        self.persist_settings();
+        self.push_log(if mirror {
+            "зеркало: да"
+        } else {
+            "зеркало: нет"
+        });
+        self.restart_camera_if_running("Изменён режим зеркалирования");
     }
 
     pub fn gesture_camera_resolution(&self) -> (u32, u32) {
@@ -252,7 +373,12 @@ impl GestureViewModel {
     pub fn set_gesture_camera_resolution(&mut self, width: u32, height: u32) {
         self.gesture_camera_width = width.max(160);
         self.gesture_camera_height = height.max(120);
-        self.push_log(format!("{}×{}", self.gesture_camera_width, self.gesture_camera_height));
+        self.persist_settings();
+        self.push_log(format!(
+            "{}×{}",
+            self.gesture_camera_width, self.gesture_camera_height
+        ));
+        self.restart_camera_if_running("Изменено разрешение камеры");
     }
 
     pub fn gesture_camera_fps(&self) -> u32 {
@@ -261,21 +387,31 @@ impl GestureViewModel {
 
     pub fn set_gesture_camera_fps(&mut self, fps: u32) {
         self.gesture_camera_fps = fps.clamp(5, 60);
+        self.persist_settings();
         self.push_log(format!("fps {}", self.gesture_camera_fps));
+        self.restart_camera_if_running("Изменён FPS");
+    }
+
+    pub fn context_detection_mode(&self) -> ContextDetectionMode {
+        self.context_detection_mode
+    }
+
+    pub fn set_context_detection_mode(&mut self, mode: ContextDetectionMode) {
+        self.context_detection_mode = mode;
+        self.gesture_service.set_context_detection_mode(mode);
+        self.persist_settings();
+        self.push_log(format!("контекст: {}", mode.label_ru()));
     }
 
     pub fn gesture_run_mode(&self) -> AppRunMode {
-        self.gesture_run_mode
+        self.gesture_manual_run_mode
     }
 
     pub fn set_gesture_run_mode(&mut self, mode: AppRunMode) {
-        self.gesture_run_mode = mode;
-        let s = match mode {
-            AppRunMode::Desktop => "контекст: стол",
-            AppRunMode::Media => "контекст: медиа",
-            AppRunMode::Browser => "контекст: браузер",
-        };
-        self.push_log(s);
+        self.gesture_manual_run_mode = mode;
+        self.gesture_service.set_manual_run_mode(mode);
+        self.persist_settings();
+        self.push_log(format!("ручной контекст: {}", mode.label_ru()));
     }
 
     pub fn gesture_sensitivity(&self) -> f32 {
@@ -284,7 +420,9 @@ impl GestureViewModel {
 
     pub fn set_gesture_sensitivity(&mut self, value: f32) {
         self.gesture_sensitivity = value.clamp(0.1, 1.0);
-        self.gesture_service.set_sensitivity(self.gesture_sensitivity);
+        self.gesture_service
+            .set_sensitivity(self.gesture_sensitivity);
+        self.persist_settings();
         self.push_log(format!("чувств. {:.0}%", self.gesture_sensitivity * 100.0));
     }
 
@@ -296,6 +434,64 @@ impl GestureViewModel {
         self.gesture_cooldown_secs = secs.clamp(0.0, 10.0);
         let ms = (self.gesture_cooldown_secs * 1000.0).round() as u32;
         self.gesture_service.set_gesture_cooldown_ms(ms);
-        self.push_log(format!("пауза после жеста: {:.1} с", self.gesture_cooldown_secs));
+        self.persist_settings();
+        self.push_log(format!(
+            "пауза после жеста: {:.1} с",
+            self.gesture_cooldown_secs
+        ));
+    }
+
+    pub fn gesture_backend_kind(&self) -> GestureBackendKind {
+        self.gesture_backend_kind
+    }
+
+    pub fn set_gesture_backend_kind(&mut self, kind: GestureBackendKind) {
+        self.gesture_backend_kind = kind;
+        self.persist_settings();
+        self.push_log(format!("backend: {}", kind.label_ru()));
+        self.restart_camera_if_running("Изменён gesture backend");
+    }
+
+    pub fn mediapipe_model_path(&self) -> &str {
+        &self.mediapipe_model_path
+    }
+
+    pub fn set_mediapipe_model_path(&mut self, path: String) {
+        self.mediapipe_model_path = path;
+        self.persist_settings();
+    }
+
+    pub fn context_rules(&self) -> &[ContextRule] {
+        &self.context_rules
+    }
+
+    pub fn context_rules_mut(&mut self) -> &mut Vec<ContextRule> {
+        &mut self.context_rules
+    }
+
+    pub fn add_context_rule(&mut self) {
+        self.context_rules.push(ContextRule::new(
+            format!("Правило {}", self.context_rules.len() + 1),
+            "",
+            "",
+            AppRunMode::Desktop,
+        ));
+        self.commit_context_rules("добавлено правило контекста");
+    }
+
+    pub fn remove_context_rule(&mut self, index: usize) {
+        if index < self.context_rules.len() {
+            self.context_rules.remove(index);
+            self.commit_context_rules("удалено правило контекста");
+        }
+    }
+
+    pub fn commit_context_rules(&mut self, reason: &str) {
+        self.gesture_service.set_context_rules(&self.context_rules);
+        if let Err(error) = context_rules_io::save(&self.context_rules) {
+            self.push_log(format!("правила не сохранены: {error}"));
+        } else if !reason.is_empty() {
+            self.push_log(reason.to_owned());
+        }
     }
 }

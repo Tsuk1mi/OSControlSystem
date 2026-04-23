@@ -4,7 +4,7 @@ use crate::gesture_os_control::domain::entities::command::OsCommand;
 use crate::gesture_os_control::domain::entities::gesture::AppRunMode;
 use crate::gesture_os_control::domain::value_objects::gesture_id::GestureId;
 
-/// Карта «жест → команда» с учётом режима приложения.
+// Карта «жест → команда» с учётом режима приложения.
 #[derive(Clone, Debug)]
 pub struct GestureCommandMap {
     pub desktop: HashMap<GestureId, OsCommand>,
@@ -26,7 +26,9 @@ impl GestureCommandMap {
         desktop.insert(GestureId::OpenPalm, OsCommand::LockWorkstation);
         desktop.insert(GestureId::ClosedFist, OsCommand::Mute);
         desktop.insert(GestureId::ThumbUp, OsCommand::VolumeUp);
+        desktop.insert(GestureId::ThumbDown, OsCommand::VolumeDown);
         desktop.insert(GestureId::Pointing, OsCommand::OpenMenu);
+        desktop.insert(GestureId::Victory, OsCommand::OpenExplorer);
 
         let mut media = desktop.clone();
         media.insert(GestureId::ClosedFist, OsCommand::PlayPause);
@@ -34,12 +36,16 @@ impl GestureCommandMap {
         media.insert(GestureId::SwipeLeft, OsCommand::PreviousDesktop);
         media.insert(GestureId::Pointing, OsCommand::VolumeDown);
         media.insert(GestureId::OpenPalm, OsCommand::SwitchAudioOutput);
+        media.insert(GestureId::ThumbDown, OsCommand::Mute);
+        media.insert(GestureId::Victory, OsCommand::OpenNotepad);
 
         let mut browser = desktop.clone();
         browser.insert(GestureId::SwipeRight, OsCommand::BrowserNextTab);
         browser.insert(GestureId::SwipeLeft, OsCommand::BrowserPreviousTab);
         browser.insert(GestureId::Pointing, OsCommand::ScrollDown);
         browser.insert(GestureId::ThumbUp, OsCommand::ScrollUp);
+        browser.insert(GestureId::ThumbDown, OsCommand::BrowserPreviousTab);
+        browser.insert(GestureId::Victory, OsCommand::BrowserNextTab);
 
         Self {
             desktop,

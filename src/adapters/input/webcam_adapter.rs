@@ -1,14 +1,16 @@
 use std::time::{Duration, Instant};
 
 use nokhwa::pixel_format::RgbFormat;
-use nokhwa::utils::{ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType, Resolution};
+use nokhwa::utils::{
+    ApiBackend, CameraFormat, CameraIndex, FrameFormat, RequestedFormat, RequestedFormatType,
+    Resolution,
+};
 use nokhwa::{Camera, query};
 
 use crate::gesture_os_control::application::dto::frame_dto::FrameDto;
 use crate::gesture_os_control::application::ports::input::camera_input_port::CameraInputPort;
 
 const DEFAULT_DEVICE_LABEL: &str = "Камера по умолчанию";
-
 
 #[derive(Clone, Debug)]
 pub struct WebcamAdapterConfig {
@@ -26,7 +28,7 @@ impl Default for WebcamAdapterConfig {
             camera_id: DEFAULT_DEVICE_LABEL.to_owned(),
             width: 640,
             height: 480,
-            fps: 30,
+            fps: 60,
             mirror_horizontal: false,
         }
     }
@@ -160,7 +162,10 @@ impl WebcamAdapter {
         self.open()
     }
 
-    fn capture_rgb(camera: &mut Camera, mirror_horizontal: bool) -> Result<(u32, u32, Vec<u8>), String> {
+    fn capture_rgb(
+        camera: &mut Camera,
+        mirror_horizontal: bool,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
         let buffer = camera
             .frame()
             .map_err(|error| format!("Ошибка чтения кадра: {error}"))?;
@@ -235,10 +240,8 @@ fn open_camera_with_format_fallbacks(
         Err(e) => errors.push(e),
     }
 
-    let requested = RequestedFormat::with_formats(
-        RequestedFormatType::AbsoluteHighestResolution,
-        formats,
-    );
+    let requested =
+        RequestedFormat::with_formats(RequestedFormatType::AbsoluteHighestResolution, formats);
     match Camera::with_backend(index, requested, ApiBackend::Auto) {
         Ok(cam) => return Ok(cam),
         Err(e) => errors.push(e),
@@ -264,7 +267,10 @@ fn mirror_rgb_in_place(rgb: &mut [u8], width: usize, height: usize) {
     }
 }
 
-fn resolve_camera_index(camera_id: &str, cameras: &[nokhwa::utils::CameraInfo]) -> Result<CameraIndex, String> {
+fn resolve_camera_index(
+    camera_id: &str,
+    cameras: &[nokhwa::utils::CameraInfo],
+) -> Result<CameraIndex, String> {
     if camera_id == DEFAULT_DEVICE_LABEL {
         return Ok(cameras[0].index().clone());
     }
@@ -274,9 +280,9 @@ fn resolve_camera_index(camera_id: &str, cameras: &[nokhwa::utils::CameraInfo]) 
         .iter()
         .find(|camera| normalize_device_name(&camera.human_name()) == normalized)
         .or_else(|| {
-            cameras.iter().find(|camera| {
-                normalize_device_name(&camera.human_name()).contains(&normalized)
-            })
+            cameras
+                .iter()
+                .find(|camera| normalize_device_name(&camera.human_name()).contains(&normalized))
         })
         .map(|camera| camera.index().clone())
         .ok_or_else(|| format!("Камера `{camera_id}` не найдена."))

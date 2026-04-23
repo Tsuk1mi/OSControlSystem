@@ -1,4 +1,5 @@
 pub mod command_mapper;
+pub mod context_resolver;
 pub mod gesture_classifier;
 #[cfg(feature = "opencv")]
 pub mod opencv_skin_mask;
