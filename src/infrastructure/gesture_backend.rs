@@ -1,6 +1,8 @@
+//! Два источника 21 точки кисти: **Classic** (эвристики по коже в `landmark`) и **MediaPipe**
+//! (дочерний Python-процесс, см. `mediapipe_hands_helper.py`: legacy `solutions` или `tasks.HandLandmarker`).
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use serde::Deserialize;
@@ -15,6 +17,7 @@ use crate::gesture_os_control::domain::entities::gesture_backend::GestureBackend
 use crate::gesture_os_control::domain::entities::landmark::{
     HandLandmarks, estimate_hand_landmarks, hand_landmarks_plausible,
 };
+use crate::gesture_os_control::domain::services::face_exclusion;
 
 #[derive(Clone, Debug, Default)]
 pub struct GestureBackendConfig {
@@ -227,15 +230,42 @@ struct MediaPipePythonHelper {
     label: String,
 }
 
+/// `py -3.11 -u script` / `python.exe -u script` — без `-u` первая строка JSON на Windows
+/// может «застрять» в буфере и чтение поймёт пустой stdout.
+fn build_python_command(program: &str, extra_args: &[String], script: &Path) -> Command {
+    let mut c = Command::new(program);
+    if program.eq_ignore_ascii_case("py") {
+        c.args(extra_args);
+        c.arg("-u");
+    } else {
+        c.arg("-u");
+        if !extra_args.is_empty() {
+            c.args(extra_args);
+        }
+    }
+    c.arg(script);
+    c
+}
+
+fn join_mediapipe_attempt_errors(attempts: &[String]) -> String {
+    if attempts.is_empty() {
+        return "Не удалось запустить MediaPipe helper.".to_owned();
+    }
+    let s = attempts.join(" || ");
+    if s.len() > 1_200 {
+        format!("{}…", s.chars().take(1_200).collect::<String>())
+    } else {
+        s
+    }
+}
+
 impl MediaPipePythonHelper {
     fn spawn() -> Result<Self, String> {
         let script_path = write_helper_script()?;
-        let mut last_error = None;
-        for &(program, extra_args) in python_command_candidates() {
-            let mut command = Command::new(program);
+        let mut attempt_errors: Vec<String> = Vec::new();
+        for (program, extra_args) in collect_python_launchers() {
+            let mut command = build_python_command(&program, &extra_args, script_path.as_path());
             command
-                .args(extra_args)
-                .arg(&script_path)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 // Piped stderr без чтения на Windows часто приводит к зависанию helper при объёмном выводе.
@@ -245,23 +275,45 @@ impl MediaPipePythonHelper {
             {
                 command.env("PYTHONUTF8", "1");
             }
+            let cmd_label = if extra_args.is_empty() {
+                program.clone()
+            } else {
+                format!("{program} {}", extra_args.join(" "))
+            };
+
             let mut child = match command.spawn() {
                 Ok(child) => child,
                 Err(error) => {
-                    last_error = Some(format!("{program}: {error}"));
+                    attempt_errors.push(format!("{cmd_label}: {error}"));
                     continue;
                 }
             };
-            let stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| "Не удалось получить stdin helper-процесса.".to_owned())?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| "Не удалось получить stdout helper-процесса.".to_owned())?;
+            let Some(stdin) = child.stdin.take() else {
+                let _ = child.kill();
+                attempt_errors.push(format!("{cmd_label}: нет stdin у helper."));
+                continue;
+            };
+            let Some(stdout) = child.stdout.take() else {
+                let _ = child.kill();
+                attempt_errors.push(format!("{cmd_label}: нет stdout у helper."));
+                continue;
+            };
             let mut stdout = BufReader::new(stdout);
-            let hello: HelperHello = read_json_line(&mut stdout)?;
+            let hello: HelperHello = match read_json_line(&mut stdout) {
+                Ok(h) => h,
+                Err(e) => {
+                    let status_note = child
+                        .try_wait()
+                        .ok()
+                        .flatten()
+                        .map(|s| format!(" (код выхода {s})"))
+                        .unwrap_or_default();
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    attempt_errors.push(format!("{cmd_label}: {e}{status_note}"));
+                    continue;
+                }
+            };
             if hello.ready {
                 let label = match (hello.backend, hello.version) {
                     (Some(backend), Some(version)) => format!("{backend} {version}"),
@@ -276,12 +328,13 @@ impl MediaPipePythonHelper {
                 });
             }
             let _ = child.kill();
+            let _ = child.wait();
             let error = hello
                 .error
                 .unwrap_or_else(|| "MediaPipe helper не смог инициализироваться.".to_owned());
-            last_error = Some(error);
+            attempt_errors.push(format!("{cmd_label}: {error}"));
         }
-        Err(last_error.unwrap_or_else(|| "Не удалось запустить MediaPipe helper.".to_owned()))
+        Err(join_mediapipe_attempt_errors(&attempt_errors))
     }
 
     fn process_frame(&mut self, frame: &FrameDto) -> Result<Option<HandLandmarks>, String> {
@@ -365,45 +418,92 @@ fn average_points(points: &[[f64; 3]; 21], indices: &[usize]) -> [f64; 3] {
     [sum[0] / n, sum[1] / n, sum[2] / n]
 }
 
+/// Сначала каталог exe (лучше для антивирусов), затем temp.
 fn write_helper_script() -> Result<PathBuf, String> {
-    let mut path = std::env::temp_dir();
-    path.push(MEDIAPIPE_HELPER_FILE_NAME);
-    fs::write(&path, MEDIAPIPE_HELPER_SOURCE).map_err(|error| {
-        format!(
-            "Не удалось записать MediaPipe helper `{}`: {error}",
-            path.display()
-        )
-    })?;
-    Ok(path)
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(mut p) = std::env::current_exe() {
+        p.pop();
+        p.push(MEDIAPIPE_HELPER_FILE_NAME);
+        candidates.push(p);
+    }
+    let mut temp = std::env::temp_dir();
+    temp.push(MEDIAPIPE_HELPER_FILE_NAME);
+    candidates.push(temp);
+
+    let mut last_err: Option<String> = None;
+    for path in candidates {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        match fs::write(&path, MEDIAPIPE_HELPER_SOURCE) {
+            Ok(()) => return Ok(path),
+            Err(error) => last_err = Some(format!("`{}`: {error}", path.display())),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "Не удалось записать MediaPipe helper.".to_owned()))
 }
 
-fn python_command_candidates() -> &'static [(&'static str, &'static [&'static str])] {
+/// `OSCONTROL_PYTHON` = полный путь к `python.exe` с mediapipe — проверяется первым.
+/// Далее `py` с версиями, где на Windows чаще есть колёса mediapipe (3.11 до общего `-3`).
+#[cfg(windows)]
+const PYTHON_WINDOWS: &[(&str, &[&str])] = &[
+    ("py", &["-3.11"]),
+    ("py", &["-3.10"]),
+    ("py", &["-3.12"]),
+    ("py", &["-3.9"]),
+    ("py", &["-3"]),
+    ("py", &["-3.13"]),
+    ("python", &[]),
+    // `python3` в PATH на Windows нередко — заглушка Microsoft Store (пустой stdout).
+];
+
+fn collect_python_launchers() -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    if let Ok(s) = std::env::var("OSCONTROL_PYTHON") {
+        let t = s.trim();
+        if !t.is_empty() {
+            out.push((t.to_owned(), Vec::new()));
+        }
+    }
     #[cfg(windows)]
     {
-        &[
-            ("py", &["-3"]),
-            ("py", &["-3.12"]),
-            ("py", &["-3.11"]),
-            ("py", &["-3.10"]),
-            ("python", &[]),
-            ("python3", &[]),
-        ]
+        for &(prog, args) in PYTHON_WINDOWS {
+            out.push((
+                prog.to_owned(),
+                args.iter().map(|s| (*s).to_owned()).collect(),
+            ));
+        }
     }
     #[cfg(not(windows))]
     {
-        &[("python3", &[]), ("python", &[])]
+        out.push(("python3".to_owned(), Vec::new()));
+        out.push(("python".to_owned(), Vec::new()));
     }
+    out
 }
 
-/// Узкая сторона кадра для IPC с Python: меньше данных и быстрее `hands.process`, координаты всё равно нормализованы 0–1.
-const MEDIAPIPE_HELPER_MAX_SIDE: u32 = 320;
+/// Узкая сторона кадра для IPC с Python: баланс скорости и детализации landmarks.
+const MEDIAPIPE_HELPER_MAX_SIDE: u32 = 480;
+
+/// По умолчанию лицо на кадре для MediaPipe не маскируем (иначе кисть у лица хуже).
+/// Включить: `set OSCONTROL_FACE_MASK_MEDIAPIPE=1`
+fn mediapipe_optional_face_mask_rgb(rgb: &mut [u8], w: usize, h: usize) {
+    let on = std::env::var("OSCONTROL_FACE_MASK_MEDIAPIPE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if on {
+        face_exclusion::apply_to_rgb8_blackout(rgb, w, h);
+    }
+}
 
 fn mediapipe_downscaled_rgb(frame: &FrameDto) -> (u32, u32, Vec<u8>) {
     let w = frame.width.max(1);
     let h = frame.height.max(1);
     let m = w.max(h);
     if m <= MEDIAPIPE_HELPER_MAX_SIDE {
-        return (w, h, frame.rgb8.clone());
+        let mut buf = frame.rgb8.clone();
+        mediapipe_optional_face_mask_rgb(&mut buf, w as usize, h as usize);
+        return (w, h, buf);
     }
     let scale = MEDIAPIPE_HELPER_MAX_SIDE as f64 / m as f64;
     let nw = ((w as f64) * scale).round().max(1.0) as u32;
@@ -420,6 +520,7 @@ fn mediapipe_downscaled_rgb(frame: &FrameDto) -> (u32, u32, Vec<u8>) {
             }
         }
     }
+    mediapipe_optional_face_mask_rgb(&mut out, nw as usize, nh as usize);
     (nw, nh, out)
 }
 
@@ -429,7 +530,17 @@ fn read_json_line<T: DeserializeOwned>(reader: &mut BufReader<ChildStdout>) -> R
         .read_line(&mut line)
         .map_err(|error| format!("stdout MediaPipe helper: {error}"))?;
     if read == 0 || line.trim().is_empty() {
-        return Err("MediaPipe helper не вернул ответ.".to_owned());
+        return Err(
+            "пустой stdout: процесс сразу завершился или не вывел JSON. \
+             На Windows команда `python3` в PATH часто ведёт в Microsoft Store без реального Python — \
+             поставьте python.org, выполните py -3.11 -m pip install mediapipe numpy, \
+             либо задайте OSCONTROL_PYTHON=полный_путь\\python.exe"
+                .to_owned(),
+        );
     }
-    serde_json::from_str(line.trim()).map_err(|error| format!("JSON MediaPipe helper: {error}"))
+    let trimmed = line.trim();
+    serde_json::from_str(trimmed).map_err(|error| {
+        let preview: String = trimmed.chars().take(160).collect();
+        format!("JSON MediaPipe helper: {error} (строка: {preview})")
+    })
 }

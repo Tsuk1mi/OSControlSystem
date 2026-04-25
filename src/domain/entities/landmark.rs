@@ -1,7 +1,10 @@
 //! Упрощённая оценка 2D-landmarks кисти по цвету кожи и радиальному профилю контура ладони.
 //! Не заменяет MediaPipe, но даёт стабильный набор точек для геометрического классификатора.
+//! Зона лица в кадре маскируется, кожный компонент выбирается по смещению вниз (см. `face_exclusion`).
 
 use std::f64::consts::PI;
+
+use crate::gesture_os_control::domain::services::face_exclusion;
 
 /// 21 точка в стиле MediaPipe Hands (x, y в пикселях исходного кадра, z=0).
 #[derive(Clone, Debug)]
@@ -15,8 +18,9 @@ pub struct HandLandmarks {
 pub fn estimate_hand_landmarks(rgb: &[u8], width: usize, height: usize) -> Option<HandLandmarks> {
     let (sw, sh) = (160_usize, 120_usize);
     let small = downsample_rgb(rgb, width, height, sw, sh);
-    let mask = skin_mask_preferred(&small, sw, sh);
-    let component = largest_component(&mask, sw, sh)?;
+    let mut mask = skin_mask_preferred(&small, sw, sh);
+    face_exclusion::apply_to_skin_mask(&mut mask, sw, sh);
+    let component = best_scored_hand_skin_component(&mask, sw, sh)?;
     let (centroid_x, centroid_y, area) = component_stats(&component, sw, sh);
     if area < 240 {
         return None;
@@ -135,15 +139,16 @@ pub fn hand_landmarks_plausible(
     let mid_mcp = lm.points[9];
     let scale = distance_xy(&wrist, &mid_mcp).max(1.0e-3);
 
-    let scale_min = min_dim * 0.045;
-    let scale_max = min_dim * 0.52;
+    // Диапазон шире: MediaPipe и дальняя рука дают меньший масштаб, чем «идеальная» классика.
+    let scale_min = min_dim * 0.030;
+    let scale_max = min_dim * 0.60;
     if !(scale_min..=scale_max).contains(&scale) {
         return false;
     }
 
     let palm_c = lm.palm_center;
     let wrist_to_palm = distance_xy(&wrist, &palm_c);
-    if wrist_to_palm < scale * 0.10 || wrist_to_palm > scale * 1.48 {
+    if wrist_to_palm < scale * 0.08 || wrist_to_palm > scale * 1.60 {
         return false;
     }
 
@@ -208,10 +213,36 @@ fn skin_mask_classic(rgb: &[u8], w: usize, h: usize) -> Vec<bool> {
     mask
 }
 
-fn largest_component(mask: &[bool], w: usize, h: usize) -> Option<Vec<bool>> {
-    let mut visited = vec![false; mask.len()];
-    let mut best: Option<(usize, Vec<bool>)> = None;
+/// Несколько кожных компонент: выбираем ту, что ближе к типичному положению кисти
+/// (ниже по кадру, не «как лицо» — круглое пятно вверху).
+fn best_scored_hand_skin_component(mask: &[bool], w: usize, h: usize) -> Option<Vec<bool>> {
+    const MIN_AREA: usize = 160;
+    let components = enumerate_skin_components(mask, w, h, MIN_AREA);
+    if components.is_empty() {
+        return None;
+    }
+    let h_f = h as f64;
+    let mut best: Option<(f64, Vec<bool>)> = None;
+    for cells in components {
+        let score = score_component_hand_likeness(&cells, w, h, h_f);
+        let comp = skin_cells_to_mask(&cells, mask.len());
+        match &best {
+            None => best = Some((score, comp)),
+            Some((s, _)) if score > *s => best = Some((score, comp)),
+            _ => {}
+        }
+    }
+    best.map(|(_, m)| m)
+}
 
+fn enumerate_skin_components(
+    mask: &[bool],
+    w: usize,
+    h: usize,
+    min_area: usize,
+) -> Vec<Vec<usize>> {
+    let mut visited = vec![false; mask.len()];
+    let mut out = Vec::new();
     for start in 0..mask.len() {
         if !mask[start] || visited[start] {
             continue;
@@ -241,23 +272,54 @@ fn largest_component(mask: &[bool], w: usize, h: usize) -> Option<Vec<bool>> {
                 }
             }
         }
-        if cells.len() < 160 {
-            continue;
-        }
-        if best
-            .as_ref()
-            .map(|(area, _)| cells.len() > *area)
-            .unwrap_or(true)
-        {
-            let mut comp = vec![false; mask.len()];
-            for idx in cells.iter().copied() {
-                comp[idx] = true;
-            }
-            best = Some((cells.len(), comp));
+        if cells.len() >= min_area {
+            out.push(cells);
         }
     }
+    out
+}
 
-    best.map(|(_, c)| c)
+fn skin_cells_to_mask(cells: &[usize], len: usize) -> Vec<bool> {
+    let mut c = vec![false; len];
+    for &i in cells {
+        c[i] = true;
+    }
+    c
+}
+
+fn score_component_hand_likeness(cells: &[usize], w: usize, h: usize, h_f: f64) -> f64 {
+    let n = cells.len();
+    if n < 160 {
+        return 0.0;
+    }
+    let mut min_x = w;
+    let mut min_y = h;
+    let mut max_x = 0_usize;
+    let mut max_y = 0_usize;
+    let mut sy = 0.0_f64;
+    for &idx in cells {
+        let x = idx % w;
+        let y = idx / w;
+        sy += y as f64;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    let cy = sy / n as f64;
+    let bw = (max_x - min_x + 1) as f64;
+    let bh = (max_y - min_y + 1) as f64;
+    let long = bw.max(bh);
+    let short = bw.min(bh);
+    let aspect = if long > 0.0 { short / long } else { 0.0 };
+    let vertical = (cy / h_f).powi(2);
+    let top_round_penalty = if cy < 0.30 * h_f && aspect > 0.52 && n > 1_800 {
+        0.45
+    } else {
+        1.0
+    };
+    let elong = (1.0 - aspect).clamp(0.0, 1.0);
+    (n as f64).ln_1p() * (0.12 + 0.88 * vertical) * top_round_penalty * (1.0 + 0.18 * elong)
 }
 
 fn component_stats(component: &[bool], w: usize, _h: usize) -> (f64, f64, usize) {

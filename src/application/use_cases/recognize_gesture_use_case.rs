@@ -1,3 +1,4 @@
+//! Один кадр: бэкенд → landmarks → `GestureClassifier` (без temporal-фильтра и команд).
 use crate::gesture_os_control::application::dto::frame_dto::FrameDto;
 use crate::gesture_os_control::application::dto::gesture_debug_dto::GestureDebugFrameDto;
 use crate::gesture_os_control::application::ports::input::gesture_backend_port::GestureBackendPort;

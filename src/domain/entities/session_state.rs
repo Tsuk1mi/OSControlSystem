@@ -1,3 +1,5 @@
+//! Агрегат состояния для обработки видеопотока: классификатор, temporal-фильтр, маппинг команд,
+//! safety-guard и cooldown после успешной команды.
 use std::time::Instant;
 
 use crate::gesture_os_control::domain::entities::gesture::PipelineGestureStats;

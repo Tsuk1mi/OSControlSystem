@@ -1,3 +1,5 @@
+//! Слой представления: eframe, модель вида, вкладки настроек/видео/привязок.
+
 mod bindings_tab;
 mod calibration_view;
 mod gesture_app;

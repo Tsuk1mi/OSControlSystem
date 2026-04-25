@@ -1,3 +1,4 @@
+//! Точка входа: нативное окно Windows без консоли (`windows_subsystem`), запуск eframe/egui.
 #![windows_subsystem = "windows"]
 
 mod gesture_os_control;

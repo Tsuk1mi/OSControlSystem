@@ -1,3 +1,5 @@
+//! Фоновый поток: веб-камера → `RecognizeGestureUseCase` → `ProcessFrameUseCase` → команды ОС.
+//! Сообщения в UI через канал `GestureServiceMessage`.
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, RwLock};

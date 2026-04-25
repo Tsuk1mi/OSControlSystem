@@ -1,3 +1,5 @@
+//! Сглаживание по кадрам: взвешенное «голосование» в окне, пороги стабильности, защита от
+//! слишком частых подряд срабатываний одного жеста.
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
@@ -20,13 +22,13 @@ pub struct TemporalFilterConfig {
 impl Default for TemporalFilterConfig {
     fn default() -> Self {
         Self {
-            window_size: 7,
-            static_stability_threshold: 0.56,
-            dynamic_stability_threshold: 0.68,
-            static_min_repeat_interval: Duration::from_millis(520),
-            dynamic_min_repeat_interval: Duration::from_millis(760),
+            window_size: 8,
+            static_stability_threshold: 0.52,
+            dynamic_stability_threshold: 0.62,
+            static_min_repeat_interval: Duration::from_millis(480),
+            dynamic_min_repeat_interval: Duration::from_millis(640),
             static_min_hits: 3,
-            dynamic_min_hits: 4,
+            dynamic_min_hits: 3,
         }
     }
 }

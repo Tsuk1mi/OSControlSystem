@@ -1,0 +1,6 @@
+# mediapipe>=0.10.14: на Python 3.13 используется API tasks (HandLandmarker), не solutions.
+# Модель hand_landmarker.task качается при первом запуске helper рядом с exe/скриптом.
+# pip install -r python/mediapipe-requirements.txt
+# Либо OSCONTROL_PYTHON=...\python.exe
+mediapipe>=0.10.14
+numpy>=1.23.0

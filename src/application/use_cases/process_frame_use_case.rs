@@ -1,3 +1,4 @@
+//! После распознанного жеста: temporal-фильтр, маппинг, safety, cooldown.
 use std::time::Duration;
 
 use crate::gesture_os_control::domain::entities::command::OsCommand;

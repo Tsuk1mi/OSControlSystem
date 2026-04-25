@@ -3,6 +3,9 @@ name = "OSControlAssistant"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+winres = "0.1"
+
 [features]
 default = []
 ## Сегментация кожи и предобработка кадра через OpenCV (нужны библиотеки OpenCV в системе, см. https://github.com/twistedfall/opencv-rust )

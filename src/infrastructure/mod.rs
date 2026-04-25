@@ -1,3 +1,5 @@
+//! Техническая реализация: файлы настроек, поток камеры, бэкенд жестов, вспомогательные сервисы.
+
 pub mod app_settings_io;
 pub mod app_state;
 pub mod context_rules_io;

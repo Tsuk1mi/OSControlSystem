@@ -1,0 +1,4 @@
+# Единый стиль форматирования Rust (OSControlAssistant). Запуск: cargo fmt
+# Параметры совместимы со stable `rustfmt`.
+edition = "2024"
+use_field_init_shorthand = true

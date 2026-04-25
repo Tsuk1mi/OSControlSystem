@@ -139,7 +139,7 @@ fn render_backend_settings(ui: &mut egui::Ui, view_model: &mut GestureViewModel)
         ui.separator();
         ui.label(
             RichText::new(
-                "MediaPipe: внешний Python (сначала `py -3`, затем `python`). Установка: py -3 -m pip install mediapipe numpy. Без пакета включается Classic CV.",
+                "MediaPipe: Python 3.10–3.12 (на 3.13 колёс часто нет). pip: py -3.11 -m pip install -r python/mediapipe-requirements.txt. Или OSCONTROL_PYTHON=путь\\python.exe с mediapipe; скрипт: scripts\\install-mediapipe.ps1. Без пакета — Classic CV.",
             )
             .small()
             .weak(),

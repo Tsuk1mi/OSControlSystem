@@ -1,2 +1,4 @@
 /target
 .idea/
+*.pfx
+.venv-mediapipe/
